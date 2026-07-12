@@ -24,9 +24,11 @@ _check_deps()
 # ╔══════════════════════════════════════════════════════════╗
 # ║           ⚙️  BOT USER CONFIGURATION  ⚙️                 ║
 # ╠══════════════════════════════════════════════════════════╣
-TELEGRAM_BOT_TOKEN = "8963294537:AAHJch9MOwO7HBe3zM7v1SfgfufDo3nVPtk"
+# توکن دیگر داخل کد نوشته نمی‌شود؛ باید به‌عنوان متغیر محیطی
+# TELEGRAM_BOT_TOKEN تنظیم شود (مثلاً در تنظیمات Railway → Variables).
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PUT_YOUR_TOKEN_HERE")
 BOT_MAX_FILE_MB     = 1900          # سقف تلگرام برای ربات‌ها ~2000MB
-BOT_MAX_WORKERS     = 1000             # چند دانلود همزمان
+BOT_MAX_WORKERS     = 5             # چند دانلود همزمان (عدد قبلی 1000 برای سرورهای معمولی خیلی زیاد بود)
 PENDING_TTL_SECONDS = 15 * 60       # مدت اعتبار دکمه‌های کیفیت قبل از منقضی‌شدن
 # ╚══════════════════════════════════════════════════════════╝
 
