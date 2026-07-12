@@ -4,7 +4,3 @@ python-telegram-bot>=20.0
 pytube
 instaloader
 gallery-dl
-Pillow
-opencv-python-headless
-pyzbar
-pytesseract
