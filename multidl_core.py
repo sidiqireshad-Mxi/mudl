@@ -958,11 +958,37 @@ def _extract_package_id(url_or_id):
         return q["id"][0]
     raise ProviderError("package id پیدا نشد (لینک play.google.com/store/apps/details?id=... بفرستید)")
 
+
+def _validate_apk_or_raise(path, provider_name):
+    """
+    فایل APK واقعی همیشه با امضای ZIP شروع می‌شود (چون APK خودش یک بایگانی ZIP است).
+    این چک دقیقاً همان مشکلی را می‌گیرد که باعث می‌شد یک صفحه‌ی HTML/خطا (مثلاً از یک
+    آینه‌ی از کار افتاده) به‌جای APK واقعی «موفق» گزارش شود و برای کاربر ارسال شود.
+    """
+    ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except OSError as e:
+        raise ProviderError(f"{provider_name}: نتوانستم فایل دانلودشده را بخوانم ({e})")
+    if head not in ZIP_SIGNATURES:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise ProviderError(
+            f"{provider_name}: فایل دانلودشده یک APK واقعی نبود (احتمالاً آینه یک صفحه‌ی خطا/تبلیغ برگردانده)")
+    return path
+
+
 def gp_p1_apkpure_direct(url, outdir):
     pkg = _extract_package_id(url)
     link = f"https://d.apkpure.com/b/APK/{pkg}?version=latest"
     try:
-        return [stream_download(link, outdir, filename=f"{pkg}.apk")]
+        path = stream_download(link, outdir, filename=f"{pkg}.apk")
+        return [_validate_apk_or_raise(path, "apkpure direct")]
+    except ProviderError:
+        raise
     except Exception as e:
         raise ProviderError(f"apkpure direct: {e}")
 
@@ -975,7 +1001,8 @@ def gp_p2_apkpure_scrape(url, outdir):
             m = re.search(r'href="(https?://[^"]*apkpure[^"]*\.apk[^"]*)"', html)
         if not m:
             raise ProviderError("apkpure scrape: لینک دانلود پیدا نشد")
-        return [stream_download(m.group(1), outdir, filename=f"{pkg}.apk")]
+        path = stream_download(m.group(1), outdir, filename=f"{pkg}.apk")
+        return [_validate_apk_or_raise(path, "apkpure scrape")]
     except ProviderError:
         raise
     except Exception as e:
@@ -991,7 +1018,8 @@ def gp_p3_apkcombo(url, outdir):
         link = m.group(1)
         if link.startswith("/"):
             link = "https://apkcombo.com" + link
-        return [stream_download(link, outdir, filename=f"{pkg}.apk")]
+        path = stream_download(link, outdir, filename=f"{pkg}.apk")
+        return [_validate_apk_or_raise(path, "apkcombo")]
     except ProviderError:
         raise
     except Exception as e:
@@ -1052,8 +1080,24 @@ GITHUB_PROVIDERS = [gh_p1_direct_asset, gh_p2_latest_release, gh_p3_zipball]
 def reddit_p1_ytdlp(url, outdir):
     return ytdlp_download(url, outdir)
 
-def reddit_p2_redditsave(url, outdir):
-    """آینه‌ی عمومی redditsave.com برای وقتی yt-dlp به هر دلیلی جواب نداد."""
+def reddit_p2_media_unwrap(url, outdir):
+    """
+    لینک‌های reddit.com/media?url=... فقط یک wrapper دور یک لینک مستقیم (معمولاً
+    i.redd.it/v.redd.it) هستند. به‌جای اینکه yt-dlp/redditsave را درگیرش کنیم،
+    مستقیم پارامتر url را دربیاور و دانلودش کن — سریع‌تر و بدون رفتن سراغ API ردیت.
+    """
+    q = parse_qs(urlparse(url).query)
+    inner = q.get("url", [None])[0]
+    if not inner:
+        raise ProviderError("media unwrap: پارامتر url در لینک پیدا نشد")
+    inner = unquote(inner)
+    try:
+        return [stream_download(inner, outdir)]
+    except Exception as e:
+        raise ProviderError(f"media unwrap: {e}")
+
+def reddit_p3_redditsave(url, outdir):
+    """آینه‌ی عمومی redditsave.com برای وقتی yt-dlp به هر دلیلی جواب نداد (مثلاً 429)."""
     try:
         r = requests.post("https://redditsave.com/info",
                            data={"url": url}, headers=HEADERS, timeout=TIMEOUT)
@@ -1070,7 +1114,34 @@ def reddit_p2_redditsave(url, outdir):
     except Exception as e:
         raise ProviderError(f"redditsave: {e}")
 
-REDDIT_PROVIDERS = [reddit_p1_ytdlp, reddit_p2_redditsave]
+def reddit_p4_json_api(url, outdir):
+    """
+    fallback مستقل: API عمومی JSON خودِ ردیت (نیازی به کلید ندارد). چون این یک
+    مسیر متفاوت از extractor داخلی yt-dlp است، وقتی yt-dlp با 429 مواجه می‌شود
+    (rate-limit خود ردیت روی همون مسیر)، این روش گاهی همچنان جواب می‌دهد.
+    """
+    try:
+        clean = url.split("?")[0].rstrip("/")
+        r = requests.get(clean + ".json", headers=HEADERS, timeout=TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        post = data[0]["data"]["children"][0]["data"]
+        media_url = None
+        if post.get("is_video") and post.get("media", {}).get("reddit_video"):
+            media_url = post["media"]["reddit_video"].get("fallback_url")
+        if not media_url:
+            url_overridden = post.get("url_overridden_by_dest") or post.get("url")
+            if url_overridden and re.search(r"\.(mp4|gif|jpg|jpeg|png|webp)(\?|$)", url_overridden, re.I):
+                media_url = url_overridden
+        if not media_url:
+            raise ProviderError("json api: مدیایی در پست پیدا نشد")
+        return [stream_download(media_url, outdir)]
+    except ProviderError:
+        raise
+    except Exception as e:
+        raise ProviderError(f"json api: {e}")
+
+REDDIT_PROVIDERS = [reddit_p2_media_unwrap, reddit_p1_ytdlp, reddit_p3_redditsave, reddit_p4_json_api]
 
 
 # ───────────────────────── گوگل‌درایو ─────────────────────────
